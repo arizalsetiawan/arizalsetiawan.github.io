@@ -2,146 +2,36 @@
 <html lang="id">
 <head>
   <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Live Scanner (ZXing → Scriptable)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Camera Test (getUserMedia)</title>
   <style>
-    html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial}
-    #app{display:flex;flex-direction:column;height:100%}
-    #view{flex:1;position:relative;background:#000;display:flex;align-items:center;justify-content:center}
-    video{width:100%;height:100%;object-fit:cover}
-    #bar{padding:10px;border-top:1px solid #eee;display:flex;gap:8px;align-items:center}
-    #status{flex:1;font-size:14px}
-    button{padding:10px 14px;border-radius:10px;border:0;background:#007aff;color:#fff;font-weight:600}
-    #start{background:#34c759}
-    #err{color:#ff3b30;white-space:pre-wrap;font-size:12px;margin:8px 12px}
+    body{margin:0;padding:16px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial}
+    video{width:100%;height:60vh;object-fit:cover;background:#000;border-radius:12px}
+    button{padding:10px 14px;border:0;border-radius:10px;background:#34c759;color:#fff;font-weight:700}
+    #log{white-space:pre-wrap;color:#ff3b30;margin-top:10px;font-size:12px}
   </style>
 </head>
 <body>
-  <div id="app">
-    <div id="view"></div>
-    <div id="bar">
-      <div id="status">Siap. Tekan “Mulai Scan”.</div>
-      <button id="start">Mulai Scan</button>
-      <button id="swap" disabled>Ganti Kamera</button>
-    </div>
-    <div id="err"></div>
-  </div>
+  <h3>Camera Test</h3>
+  <video id="v" playsinline autoplay muted></video><br><br>
+  <button id="btn">Mulai Kamera</button>
+  <div id="log"></div>
 
-  <!-- Pakai UMD build agar kompatibel luas (iOS lama/baru) -->
-  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script>
   <script>
-    const statusEl = document.getElementById('status');
-    const startBtn = document.getElementById('start');
-    const swapBtn  = document.getElementById('swap');
-    const view     = document.getElementById('view');
-    const errEl    = document.getElementById('err');
-
-    const { BrowserMultiFormatReader } = ZXing; // dari UMD
-    const codeReader = new BrowserMultiFormatReader();
-
-    let devices = [];
-    let currentIndex = 0;
-    let stopControls = null;
-    let videoEl = null;
-
-    // Ambil nama script Scriptable dari ?cb=..., default “Scan Stok (Live ZXing)”
-    const scriptName = new URL(location.href).searchParams.get('cb') || "Scan Stok (Live ZXing)";
-
-    function setStatus(t){ statusEl.textContent = t; }
-    function setError(e){ errEl.textContent = e || ""; }
-
-    async function ensureSupport() {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error("Peramban tidak mendukung kamera. Pastikan HTTPS & izin kamera diaktifkan.");
-      }
-    }
-
-    async function requestPermissionOnce() {
-      // WAJIB dipanggil setelah klik user
-      setStatus("Meminta izin kamera…");
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } },
-        audio: false
-      });
-      // tutup stream; ZXing akan buka lagi
-      stream.getTracks().forEach(t => t.stop());
-    }
-
-    async function listCams() {
-      devices = await codeReader.listVideoInputDevices();
-      if (!devices.length) {
-        throw new Error("Tidak menemukan kamera. Cek Settings > Safari > Camera (Allow) dan Website Settings domain ini.");
-      }
-      // prioritaskan kamera belakang
-      const back = devices.findIndex(d => /back|rear|environment|belakang/i.test(d.label));
-      if (back >= 0) currentIndex = back;
-      swapBtn.disabled = devices.length <= 1;
-    }
-
-    async function startDecode(idx = 0) {
-      view.innerHTML = "";
-      videoEl = document.createElement('video');
-      videoEl.setAttribute('playsinline','true');
-      videoEl.setAttribute('autoplay','true');
-      videoEl.setAttribute('muted','true'); // iOS autoplay policy
-      videoEl.playsInline = true;
-      videoEl.muted = true;
-      view.appendChild(videoEl);
-
-      const deviceId = devices[idx]?.deviceId;
-      setStatus("Memulai kamera…");
-      stopControls = await codeReader.decodeFromVideoDevice(
-        deviceId,
-        videoEl,
-        (result, err, controls) => {
-          if (result?.getText) {
-            const code = result.getText();
-            setStatus("Terbaca: " + code);
-            try { controls.stop(); } catch(_) {}
-            // Callback ke Scriptable (jalankan ulang script dengan query ?code=...)
-            location.href = "scriptable:///run?scriptName="
-              + encodeURIComponent(scriptName)
-              + "&code=" + encodeURIComponent(code);
-          }
+    const v = document.getElementById('v');
+    const log = (m)=>document.getElementById('log').textContent = m || "";
+    document.getElementById('btn').addEventListener('click', async ()=>{
+      log("");
+      try{
+        if(!navigator.mediaDevices?.getUserMedia){
+          throw new Error("Browser tidak mendukung getUserMedia. Pastikan HTTPS & iOS Safari.");
         }
-      );
-      setStatus("Arahkan kamera ke barcode…");
-    }
-
-    async function stopDecode() {
-      try { if (stopControls) stopControls.stop(); } catch(_) {}
-      stopControls = null;
-      if (videoEl?.srcObject) {
-        try { videoEl.srcObject.getTracks().forEach(t => t.stop()); } catch(_) {}
-      }
-    }
-
-    // ————— Event handlers (WAJIB Klik) —————
-    startBtn.addEventListener('click', async () => {
-      startBtn.disabled = true;
-      setError("");
-      try {
-        await ensureSupport();
-        await requestPermissionOnce();        // ← ini yang memicu prompt izin
-        await listCams();
-        await startDecode(currentIndex);
-      } catch (e) {
-        setError(e.message || String(e));
-        setStatus("Gagal memulai.");
-        startBtn.disabled = false;
-      }
-    });
-
-    swapBtn.addEventListener('click', async () => {
-      if (!devices.length) return;
-      setError("");
-      try {
-        currentIndex = (currentIndex + 1) % devices.length;
-        await stopDecode();
-        await startDecode(currentIndex);
-      } catch (e) {
-        setError(e.message || String(e));
-      }
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false
+        });
+        v.srcObject = stream;
+      }catch(e){ log(e.message || String(e)); }
     });
   </script>
 </body>
