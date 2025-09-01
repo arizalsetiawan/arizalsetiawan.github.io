@@ -27,65 +27,78 @@
     <div id="err"></div>
   </div>
 
-  <script type="module">
-    import { BrowserMultiFormatReader } from "https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/esm/index.min.js";
-
+  <!-- Pakai UMD build agar kompatibel luas (iOS lama/baru) -->
+  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script>
+  <script>
     const statusEl = document.getElementById('status');
     const startBtn = document.getElementById('start');
     const swapBtn  = document.getElementById('swap');
     const view     = document.getElementById('view');
     const errEl    = document.getElementById('err');
 
+    const { BrowserMultiFormatReader } = ZXing; // dari UMD
     const codeReader = new BrowserMultiFormatReader();
+
     let devices = [];
     let currentIndex = 0;
     let stopControls = null;
     let videoEl = null;
 
-    // ambil nama script dari query ?cb=..., kalau tidak ada pakai default:
-    const url = new URL(location.href);
-    const scriptName = url.searchParams.get('cb') || "Scan Stok (Live ZXing)";
+    // Ambil nama script Scriptable dari ?cb=..., default “Scan Stok (Live ZXing)”
+    const scriptName = new URL(location.href).searchParams.get('cb') || "Scan Stok (Live ZXing)";
 
     function setStatus(t){ statusEl.textContent = t; }
     function setError(e){ errEl.textContent = e || ""; }
-    const g = fn => (...a)=>{ setError(""); Promise.resolve().then(()=>fn(...a)).catch(e=>{ setError(e.message||String(e)); setStatus("Gagal memulai."); }); };
 
     async function ensureSupport() {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error("Peramban tidak mendukung kamera (getUserMedia). Pastikan HTTPS & izin kamera diizinkan.");
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("Peramban tidak mendukung kamera. Pastikan HTTPS & izin kamera diaktifkan.");
       }
     }
+
     async function requestPermissionOnce() {
+      // WAJIB dipanggil setelah klik user
       setStatus("Meminta izin kamera…");
-      const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal:"environment" } }, audio:false });
-      s.getTracks().forEach(t=>t.stop());
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false
+      });
+      // tutup stream; ZXing akan buka lagi
+      stream.getTracks().forEach(t => t.stop());
     }
+
     async function listCams() {
       devices = await codeReader.listVideoInputDevices();
-      if (!devices.length) throw new Error("Tidak ada kamera. Cek izin situs.");
-      const backIdx = devices.findIndex(d => /back|rear|environment|belakang/i.test(d.label));
-      if (backIdx >= 0) currentIndex = backIdx;
+      if (!devices.length) {
+        throw new Error("Tidak menemukan kamera. Cek Settings > Safari > Camera (Allow) dan Website Settings domain ini.");
+      }
+      // prioritaskan kamera belakang
+      const back = devices.findIndex(d => /back|rear|environment|belakang/i.test(d.label));
+      if (back >= 0) currentIndex = back;
       swapBtn.disabled = devices.length <= 1;
     }
-    async function startDecode(idx=0) {
+
+    async function startDecode(idx = 0) {
       view.innerHTML = "";
       videoEl = document.createElement('video');
       videoEl.setAttribute('playsinline','true');
       videoEl.setAttribute('autoplay','true');
-      videoEl.setAttribute('muted','true');
-      videoEl.playsInline = true; videoEl.muted = true;
+      videoEl.setAttribute('muted','true'); // iOS autoplay policy
+      videoEl.playsInline = true;
+      videoEl.muted = true;
       view.appendChild(videoEl);
 
       const deviceId = devices[idx]?.deviceId;
       setStatus("Memulai kamera…");
       stopControls = await codeReader.decodeFromVideoDevice(
-        deviceId, videoEl,
+        deviceId,
+        videoEl,
         (result, err, controls) => {
           if (result?.getText) {
             const code = result.getText();
             setStatus("Terbaca: " + code);
             try { controls.stop(); } catch(_) {}
-            // callback ke Scriptable (JALANKAN script dengan parameter code=...)
+            // Callback ke Scriptable (jalankan ulang script dengan query ?code=...)
             location.href = "scriptable:///run?scriptName="
               + encodeURIComponent(scriptName)
               + "&code=" + encodeURIComponent(code);
@@ -94,25 +107,42 @@
       );
       setStatus("Arahkan kamera ke barcode…");
     }
+
     async function stopDecode() {
       try { if (stopControls) stopControls.stop(); } catch(_) {}
       stopControls = null;
-      if (videoEl?.srcObject) { try { videoEl.srcObject.getTracks().forEach(t=>t.stop()); } catch(_) {} }
+      if (videoEl?.srcObject) {
+        try { videoEl.srcObject.getTracks().forEach(t => t.stop()); } catch(_) {}
+      }
     }
 
-    startBtn.addEventListener('click', g(async ()=>{
+    // ————— Event handlers (WAJIB Klik) —————
+    startBtn.addEventListener('click', async () => {
       startBtn.disabled = true;
-      await ensureSupport();
-      await requestPermissionOnce();  // harus setelah gesture
-      await listCams();
-      await startDecode(currentIndex);
-    }));
-    swapBtn.addEventListener('click', g(async ()=>{
+      setError("");
+      try {
+        await ensureSupport();
+        await requestPermissionOnce();        // ← ini yang memicu prompt izin
+        await listCams();
+        await startDecode(currentIndex);
+      } catch (e) {
+        setError(e.message || String(e));
+        setStatus("Gagal memulai.");
+        startBtn.disabled = false;
+      }
+    });
+
+    swapBtn.addEventListener('click', async () => {
       if (!devices.length) return;
-      currentIndex = (currentIndex + 1) % devices.length;
-      await stopDecode();
-      await startDecode(currentIndex);
-    }));
+      setError("");
+      try {
+        currentIndex = (currentIndex + 1) % devices.length;
+        await stopDecode();
+        await startDecode(currentIndex);
+      } catch (e) {
+        setError(e.message || String(e));
+      }
+    });
   </script>
 </body>
 </html>
