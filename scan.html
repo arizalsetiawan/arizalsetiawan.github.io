@@ -2,37 +2,138 @@
 <html lang="id">
 <head>
   <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Camera Test (getUserMedia)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+  <title>Live Scanner (ZXing → Scriptable)</title>
   <style>
-    body{margin:0;padding:16px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial}
-    video{width:100%;height:60vh;object-fit:cover;background:#000;border-radius:12px}
-    button{padding:10px 14px;border:0;border-radius:10px;background:#34c759;color:#fff;font-weight:700}
-    #log{white-space:pre-wrap;color:#ff3b30;margin-top:10px;font-size:12px}
+    html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial}
+    #app{display:flex;flex-direction:column;height:100%}
+    #view{flex:1;position:relative;background:#000;display:flex;align-items:center;justify-content:center}
+    video{width:100%;height:100%;object-fit:cover}
+    #bar{padding:10px;border-top:1px solid #eee;display:flex;gap:8px;align-items:center}
+    #status{flex:1;font-size:14px}
+    button{padding:10px 14px;border-radius:10px;border:0;background:#007aff;color:#fff;font-weight:700}
+    #start{background:#34c759}
+    #err{color:#ff3b30;white-space:pre-wrap;font-size:12px;margin:8px 12px}
   </style>
 </head>
 <body>
-  <h3>Camera Test</h3>
-  <video id="v" playsinline autoplay muted></video><br><br>
-  <button id="btn">Mulai Kamera</button>
-  <div id="log"></div>
+  <div id="app">
+    <div id="view"><video id="vid" playsinline autoplay muted></video></div>
+    <div id="bar">
+      <div id="status">Siap. Tekan “Mulai Scan”.</div>
+      <button id="start">Mulai Scan</button>
+      <button id="swap" disabled>Ganti Kamera</button>
+    </div>
+    <div id="err"></div>
+  </div>
 
+  <!-- UMD build ZXing -->
+  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script>
   <script>
-    const v = document.getElementById('v');
-    const log = (m)=>document.getElementById('log').textContent = m || "";
-    document.getElementById('btn').addEventListener('click', async ()=>{
-      log("");
+    const { BrowserMultiFormatReader } = ZXing;
+    const codeReader = new BrowserMultiFormatReader();
+
+    const statusEl = document.getElementById('status');
+    const startBtn = document.getElementById('start');
+    const swapBtn  = document.getElementById('swap');
+    const vid      = document.getElementById('vid');
+    const errEl    = document.getElementById('err');
+
+    const url = new URL(location.href);
+    const scriptName = url.searchParams.get('cb') || "Scan Stok (Live ZXing)";
+
+    let devices = [];
+    let currentIndex = 0;
+    let stream = null;
+    let stopControls = null;
+
+    const setStatus = (t)=> statusEl.textContent = t;
+    const setErr = (e)=> errEl.textContent = e || "";
+
+    async function requestPermissionOnce(deviceId){
+      setStatus("Meminta izin kamera…");
+      const constraints = deviceId
+        ? { video: { deviceId: { exact: deviceId } }, audio: false }
+        : { video: { facingMode: { ideal: "environment" } }, audio: false };
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      vid.srcObject = stream;
+    }
+
+    async function listCams(){
+      devices = await codeReader.listVideoInputDevices();
+      if (!devices.length) throw new Error("Tidak ada kamera. Cek izin situs untuk Camera = Allow.");
+      const backIdx = devices.findIndex(d=>/back|rear|environment|belakang/i.test(d.label));
+      if (backIdx >= 0) currentIndex = backIdx;
+      swapBtn.disabled = devices.length <= 1;
+    }
+
+    async function startZXing(){
+      // Pakai "decodeFromVideoElement" agar ZXing membaca dari <video> yang sudah ber-stream
+      setStatus("Memulai pemindaian…");
+      try{
+        // Hentikan sesi sebelumnya jika ada
+        if (stopControls) { try{ stopControls.stop(); }catch(_){} stopControls = null; }
+        stopControls = await codeReader.decodeFromVideoElement(
+          vid,
+          (result, err, controls) => {
+            if (result?.getText) {
+              const code = result.getText();
+              setStatus("Terbaca: " + code);
+              try { controls.stop(); } catch(_) {}
+              // Callback ke Scriptable
+              location.href = "scriptable:///run?scriptName="
+                + encodeURIComponent(scriptName)
+                + "&code=" + encodeURIComponent(code);
+            }
+          }
+        );
+        setStatus("Arahkan kamera ke barcode…");
+      }catch(e){
+        setErr(e.message || String(e));
+        setStatus("Gagal memulai ZXing.");
+      }
+    }
+
+    async function stopAll(){
+      try { if (stopControls) stopControls.stop(); } catch(_) {}
+      stopControls = null;
+      if (stream) {
+        try { stream.getTracks().forEach(t=>t.stop()); } catch(_) {}
+        stream = null;
+      }
+      vid.srcObject = null;
+    }
+
+    startBtn.addEventListener('click', async ()=>{
+      startBtn.disabled = true; setErr("");
       try{
         if(!navigator.mediaDevices?.getUserMedia){
-          throw new Error("Browser tidak mendukung getUserMedia. Pastikan HTTPS & iOS Safari.");
+          throw new Error("Browser tidak mendukung getUserMedia (butuh HTTPS & Safari).");
         }
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" } },
-          audio: false
-        });
-        v.srcObject = stream;
-      }catch(e){ log(e.message || String(e)); }
+        await listCams();                         // enumerasi kamera (butuh izin/gesture)
+        await requestPermissionOnce(devices[currentIndex]?.deviceId); // minta izin kamera
+        await startZXing();                       // mulai ZXing dari elemen video yang sama
+      }catch(e){
+        setErr(e.message || String(e));
+        setStatus("Gagal memulai.");
+        startBtn.disabled = false;
+      }
     });
+
+    swapBtn.addEventListener('click', async ()=>{
+      if (!devices.length) return;
+      setErr("");
+      try{
+        currentIndex = (currentIndex + 1) % devices.length;
+        await stopAll();
+        await requestPermissionOnce(devices[currentIndex]?.deviceId);
+        await startZXing();
+      }catch(e){ setErr(e.message || String(e)); }
+    });
+
+    // Cleanup saat halaman ditutup/navigasi
+    window.addEventListener('pagehide', stopAll);
+    window.addEventListener('beforeunload', stopAll);
   </script>
 </body>
 </html>
