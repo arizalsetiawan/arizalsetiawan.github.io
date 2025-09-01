@@ -7,96 +7,140 @@
   <style>
     html,body{margin:0;padding:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial}
     #app{display:flex;flex-direction:column;height:100%}
-    #view{flex:1;position:relative;background:#000}
+    #view{flex:1;position:relative;background:#000;display:flex;align-items:center;justify-content:center}
     video{width:100%;height:100%;object-fit:cover}
     #bar{padding:10px;border-top:1px solid #eee;display:flex;gap:8px;align-items:center}
     #status{flex:1;font-size:14px}
-    button{padding:8px 12px;border-radius:10px;border:0;background:#007aff;color:#fff;font-weight:600}
+    button{padding:10px 14px;border-radius:10px;border:0;background:#007aff;color:#fff;font-weight:600}
+    #start{background:#34c759}
+    #err{color:#ff3b30;white-space:pre-wrap;font-size:12px;margin:8px 12px}
+    #overlay{position:absolute;inset:0;pointer-events:none;box-shadow:0 0 0 200vmax rgba(0,0,0,.25) inset}
   </style>
 </head>
 <body>
   <div id="app">
-    <div id="view"></div>
-    <div id="bar">
-      <div id="status">Menyiapkan kamera…</div>
-      <button id="swap">Ganti Kamera</button>
+    <div id="view">
+      <div id="overlay"></div>
     </div>
+    <div id="bar">
+      <div id="status">Siap. Tekan “Mulai Scan”.</div>
+      <button id="start">Mulai Scan</button>
+      <button id="swap" disabled>Ganti Kamera</button>
+    </div>
+    <div id="err"></div>
   </div>
 
-  <!-- ZXing (ESM) -->
   <script type="module">
     import { BrowserMultiFormatReader } from "https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/esm/index.min.js";
 
     const statusEl = document.getElementById('status');
+    const startBtn = document.getElementById('start');
     const swapBtn  = document.getElementById('swap');
     const view     = document.getElementById('view');
+    const errEl    = document.getElementById('err');
 
     const codeReader = new BrowserMultiFormatReader();
     let devices = [];
     let currentIndex = 0;
-    let stopFn = null;
+    let stopControls = null;
+    let videoEl = null;
 
-    function updateStatus(t){ statusEl.textContent = t; }
+    function setStatus(t){ statusEl.textContent = t; }
+    function setError(e){ errEl.textContent = e || ""; }
+    function byGesture(fn){ return (...a)=>{ setError(""); try{ fn(...a) }catch(e){ setError(String(e)) } }; }
 
-    async function listCams(){
-      devices = (await codeReader.listVideoInputDevices()) || [];
-      // prioritas kamera belakang
+    async function ensureSupport() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("Peramban tidak mendukung kamera (getUserMedia). Pastikan HTTPS & izin kamera aktif.");
+      }
+    }
+
+    async function requestPermissionOnce() {
+      // iOS membutuhkan gesture; panggil getUserMedia sekali untuk memicu prompt
+      setStatus("Meminta izin kamera…");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false
+      });
+      // hentikan stream sementara (ZXing akan membuka lagi)
+      stream.getTracks().forEach(t => t.stop());
+    }
+
+    async function listCameras() {
+      devices = await codeReader.listVideoInputDevices();
+      if (!devices || !devices.length) {
+        throw new Error("Tidak menemukan perangkat kamera. Cek izin situs (Website Settings) & Settings > Scriptable > Camera.");
+      }
+      // cari kamera belakang lebih dulu
       const backIdx = devices.findIndex(d => /back|belakang|rear|environment/i.test(d.label));
       if (backIdx >= 0) currentIndex = backIdx;
+      swapBtn.disabled = devices.length <= 1;
     }
 
-    async function start(idx = 0){
-      try {
-        updateStatus("Memulai pemindaian…");
-        const deviceId = devices[idx]?.deviceId;
-        // Bersihkan tampilan sebelumnya
-        view.innerHTML = "";
-        const videoEl = document.createElement('video');
-        videoEl.setAttribute('playsinline', 'true');
-        view.appendChild(videoEl);
+    async function startDecode(idx = 0) {
+      // siapkan elemen video baru
+      view.innerHTML = '<div id="overlay"></div>';
+      videoEl = document.createElement('video');
+      videoEl.setAttribute('playsinline','true');
+      videoEl.setAttribute('autoplay','true');
+      videoEl.setAttribute('muted','true'); // autoplay policy iOS
+      videoEl.playsInline = true;
+      videoEl.muted = true;
+      view.appendChild(videoEl);
 
-        // Mulai decode dari kamera terpilih
-        stopFn = await codeReader.decodeFromVideoDevice(
-          deviceId,
-          videoEl,
-          (result, err, controls) => {
-            if (result && result.getText) {
-              const code = result.getText();
-              updateStatus("Terbaca: " + code);
+      const deviceId = devices[idx]?.deviceId ?? undefined;
 
-              // Hentikan stream agar tidak baca berulang2
-              try { controls.stop(); } catch(e){}
-              // Redirect ke Scriptable (ditangkap oleh shouldAllowRequest)
-              const url = "scriptable://scan?code=" + encodeURIComponent(code);
-              window.location.href = url;
-            } else if (err) {
-              // ZXing terus mencoba; biarkan
-            }
+      setStatus("Memulai kamera…");
+      stopControls = await codeReader.decodeFromVideoDevice(
+        deviceId,
+        videoEl,
+        (result, err, controls) => {
+          if (result && result.getText) {
+            const code = result.getText();
+            setStatus("Terbaca: " + code);
+            try { controls.stop(); } catch(_){}
+            // Kembalikan ke Scriptable
+            location.href = "scriptable://scan?code=" + encodeURIComponent(code);
+          } else if (err) {
+            // ZXing akan terus scan; jangan spam error
+          } else {
+            setStatus("Arahkan kamera ke barcode…");
           }
-        );
-        updateStatus("Arahkan kamera ke barcode…");
-      } catch (e) {
-        console.error(e);
-        updateStatus("Gagal membuka kamera: " + e);
+        }
+      );
+    }
+
+    async function stopDecode() {
+      try { if (stopControls) stopControls.stop(); } catch(_){}
+      stopControls = null;
+      if (videoEl && videoEl.srcObject) {
+        try { videoEl.srcObject.getTracks().forEach(t=>t.stop()); } catch(_){}
       }
     }
 
-    swapBtn.addEventListener('click', async () => {
+    startBtn.addEventListener('click', byGesture(async () => {
+      startBtn.disabled = true;
+      try {
+        await ensureSupport();
+        await requestPermissionOnce();   // penting: harus setelah tap user
+        await listCameras();
+        await startDecode(currentIndex);
+      } catch (e) {
+        setError(e.message || String(e));
+        setStatus("Gagal memulai.");
+        startBtn.disabled = false;
+      }
+    }));
+
+    swapBtn.addEventListener('click', byGesture(async () => {
       if (!devices.length) return;
       currentIndex = (currentIndex + 1) % devices.length;
-      try { if (stopFn) stopFn(); } catch(e){}
-      await start(currentIndex);
-    });
+      await stopDecode();
+      await startDecode(currentIndex);
+    }));
 
-    // Boot
-    (async () => {
-      await listCams();
-      if (!devices.length) {
-        updateStatus("Tidak ada kamera tersedia / izin ditolak.");
-        return;
-      }
-      await start(currentIndex);
-    })();
+    // Catatan: jika user kembali dari Scriptable (setelah berhasil kirim code),
+    // halaman masih terbuka. ZXing akan dimulai lagi setelah user menekan "Mulai Scan".
   </script>
 </body>
 </html>
